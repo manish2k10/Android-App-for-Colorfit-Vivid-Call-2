@@ -143,6 +143,8 @@ fun HomeScreen(
                     item { ReconnectingCard(viewModel::reconnectNow) }
                 }
                 item { LiveMetricsCard(state, vendorState, isHrStreaming = viewModel.heartRateStreaming()) }
+                item { SleepCard(vendorState.historical) }
+                item { HeartRateHistoryCard(vendorState.historical) }
                 item { DeviceInfoCard(state, vendorState, capabilities) }
                 item { VendorActionsCard(viewModel) }
                 item { WeatherCard(
