@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">Colorfit Companion</string>
+    <string name="notif_channel_ble">BLE connection</string>
+    <string name="notif_channel_ble_desc">Keeps the connection to your Colorfit Vivid Call 2 alive in the background.</string>
+    <string name="notif_ble_title">Colorfit Companion</string>
+    <string name="notif_ble_text">Connected to %1$s</string>
+    <string name="notif_ble_scanning">Scanning for watch…</string>
+    <string name="notif_relay_label">Colorfit notification relay</string>
+</resources>
