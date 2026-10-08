@@ -300,3 +300,37 @@ because the global `~/.gitconfig` pins `credential.https://github.com.username`
 to a different GitHub account; the repo-local override
 `credential.https://github.com.username = manish2k10` fixed it without touching
 the global config.
+
+## 10. Background survival ("keep running always")
+
+The app was getting killed after a few minutes in the background (reported on a
+Moto G32 — Motorola is aggressive about background cleanup). Causes and fixes:
+
+* **Not battery-optimization exempt.** The dominant cause. With the app
+  battery-optimized, Doze/App-Standby and the OEM cleanup kill the process and
+  drop the BLE link regardless of the foreground service. Added
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, a `PowerSettings` helper, and a
+  warning card (`BackgroundPermissionCard`) that fires
+  `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` and disappears once granted
+  (re-checked on `ON_RESUME`).
+* **`startService()` instead of `startForegroundService()`.** Illegal from the
+  background on API 26+. All starts now go through
+  `ContextCompat.startForegroundService`, wrapped in `runCatching` to swallow
+  the API-31+ background-start refusal, with
+  `FOREGROUND_SERVICE_IMMEDIATE` so the service is promoted at once.
+* **Service only alive while actively connected.** On a cold launch with
+  auto-reconnect, nothing held the process up. The FGS is now started whenever
+  a watch is bonded — at app launch (`App.onCreate`) and after reboot/update
+  (`BootReceiver` on `BOOT_COMPLETED`/`MY_PACKAGE_REPLACED`) — and only torn
+  down on "Forget watch". `WatchPrefs` is the shared "is a watch bonded?"
+  check so these entry points don't need the Hilt graph.
+* **Sticky restart.** `START_STICKY` is kept; a null-intent restart re-asserts
+  foreground. A deliberate Stop returns `START_NOT_STICKY` so it isn't revived.
+
+OEM auto-start / "Background restriction" toggles (Motorola et al.) can't be
+set by any reliable public intent — the card links to App info and spells out
+the manual steps.
+
+New files: `ble/WatchPrefs.kt`, `ble/PowerSettings.kt`, `ble/BootReceiver.kt`.
+Touched: `AndroidManifest.xml`, `App.kt`, `BleForegroundService.kt`,
+`HomeViewModel.kt`, `HomeScreen.kt`.

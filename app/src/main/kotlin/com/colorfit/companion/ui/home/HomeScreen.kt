@@ -64,6 +64,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import android.content.Intent
+import android.provider.Settings
+import com.colorfit.companion.ble.PowerSettings
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.accompanist.permissions.isGranted
 import com.colorfit.companion.domain.ConnectionState
@@ -98,6 +104,15 @@ fun HomeScreen(
     val reconnecting by viewModel.reconnecting.collectAsStateWithLifecycle()
     val weatherStatus by viewModel.weatherStatus.collectAsStateWithLifecycle()
     val capabilities by viewModel.capabilities.collectAsStateWithLifecycle()
+
+    // Whether the app is exempt from battery optimization. Re-checked every
+    // time the screen resumes, so the warning card disappears right after the
+    // user grants the exemption in the system dialog.
+    var batteryOptimized by remember { mutableStateOf(!viewModel.isIgnoringBatteryOptimizations()) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        batteryOptimized = !viewModel.isIgnoringBatteryOptimizations()
+    }
+
     LaunchedEffect(locationPermissionState.status) {
         locationGranted = locationPermissionState.status.isGranted ||
             viewModel.hasLocationPermission()
@@ -133,6 +148,14 @@ fun HomeScreen(
         ) {
             item { ConnectionCard(state, status, viewModel::disconnect, reconnecting, viewModel::forgetWatch) }
 
+            // Nudge the user to exempt the app from battery optimization —
+            // without it, aggressive OEMs (Motorola, Xiaomi, …) kill the
+            // process and drop the BLE link after a few minutes in the
+            // background. Shown until they grant it.
+            if (batteryOptimized) {
+                item { BackgroundPermissionCard() }
+            }
+
             // Show the connected view whenever the watch is actually
             // connected OR we're silently auto-reconnecting. Only show
             // the scan card when the user explicitly chose to disconnect
@@ -165,6 +188,66 @@ fun HomeScreen(
             } else {
                 item { ScanCard(status, scanResults, viewModel::toggleScan, viewModel::connect) }
             }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundPermissionCard() {
+    val context = LocalContext.current
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "Keep running in the background",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Text(
+                "Android is still allowed to close this app to save battery, which " +
+                    "drops the watch connection after a few minutes. Allow it to run " +
+                    "unrestricted to stay connected.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Button(
+                onClick = {
+                    runCatching {
+                        context.startActivity(
+                            PowerSettings.requestIgnoreBatteryOptimizationsIntent(context),
+                        )
+                    }.onFailure {
+                        // Some OEMs don't honour the direct dialog — fall back to
+                        // the battery-optimization list screen.
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+                            )
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Allow unrestricted battery") }
+            TextButton(
+                onClick = {
+                    runCatching { context.startActivity(PowerSettings.appDetailsIntent(context)) }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Open app settings") }
+            Text(
+                "On Motorola, Xiaomi, Oppo and similar, also turn on Auto-launch and " +
+                    "turn off \"Background restriction\" under App info.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
         }
     }
 }

@@ -214,7 +214,14 @@ class HomeViewModel @Inject constructor(
         connection.disconnect()
         _reconnecting.value = false
         _userInitiatedDisconnect.value = true
+        // Nothing left to keep alive for — tear the service down so the
+        // persistent notification goes away.
+        BleForegroundService.stop(getApplication())
     }
+
+    /** True if the app is exempt from Doze / battery optimization. */
+    fun isIgnoringBatteryOptimizations(): Boolean =
+        com.colorfit.companion.ble.PowerSettings.isIgnoringBatteryOptimizations(getApplication())
 
     /** True if a fresh HR reading arrived in the last 15s. */
     fun heartRateStreaming(): Boolean = vendor.heartRateStreaming

@@ -4,6 +4,8 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import com.colorfit.companion.ble.BleForegroundService
+import com.colorfit.companion.ble.WatchPrefs
 import dagger.hilt.android.HiltAndroidApp
 import timber.log.Timber
 
@@ -15,6 +17,14 @@ class App : Application() {
             Timber.plant(Timber.DebugTree())
         }
         createBleChannel()
+        // If we already know a watch, bring the foreground service up as soon
+        // as the process starts so it keeps living while VendorConnection
+        // auto-reconnects in the background — not only while actively connected.
+        // (Refused silently if the process happened to start in the background
+        // on API 31+; the next user launch starts it cleanly.)
+        if (WatchPrefs.hasBondedWatch(this)) {
+            BleForegroundService.start(this)
+        }
     }
 
     private fun createBleChannel() {
