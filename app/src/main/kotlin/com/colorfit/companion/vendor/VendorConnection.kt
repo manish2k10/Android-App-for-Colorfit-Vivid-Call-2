@@ -111,6 +111,14 @@ class VendorConnection @Inject constructor(
     private var reconnectJob: Job? = null
 
     /**
+     * Set while the user has chosen to stay disconnected (tapped Disconnect),
+     * so neither the link drop that follows nor a later process start
+     * auto-reconnects. Persisted; cleared when they connect again.
+     */
+    private val _userDisconnected = MutableStateFlow(prefs.getBoolean(PREF_USER_DISCONNECTED, false))
+    val userDisconnected: StateFlow<Boolean> = _userDisconnected.asStateFlow()
+
+    /**
      * Guards [finishAuth] so time-sync + profile + live/history sync run
      * exactly once per connection, even though it can be reached from both
      * the auth-success response and the optimistic fallback timer. Reset on
@@ -166,9 +174,11 @@ class VendorConnection @Inject constructor(
             // observe `lastConnectedMac` and immediately flip their
             // "reconnecting" indicator on, so the user never sees the
             // scan card on relaunch.
-            reconnectJob = scope.launch {
-                delay(AUTO_RECONNECT_DELAY_MS)
-                reconnect(savedMac)
+            if (!_userDisconnected.value) {
+                reconnectJob = scope.launch {
+                    delay(AUTO_RECONNECT_DELAY_MS)
+                    reconnect(savedMac)
+                }
             }
         }
         // Watch the standard state so we can kick off the handshake after
@@ -203,9 +213,10 @@ class VendorConnection @Inject constructor(
                         syncStarted.set(false)
                         // Auto-reconnect: cheap Chinese watches drop idle
                         // connections aggressively. If we have a MAC we
-                        // bonded with, retry after a short delay.
+                        // bonded with, retry after a short delay — unless
+                        // the user disconnected on purpose.
                         val mac = lastConnectedMac
-                        if (mac != null && reconnectJob?.isActive != true) {
+                        if (mac != null && !_userDisconnected.value && reconnectJob?.isActive != true) {
                             reconnectJob = scope.launch {
                                 delay(AUTO_RECONNECT_DELAY_MS)
                                 reconnect(mac)
@@ -239,8 +250,42 @@ class VendorConnection @Inject constructor(
     /** Force a reconnect to the last bonded watch. Returns true if scheduled. */
     fun reconnectNow(): Boolean {
         val mac = lastConnectedMac ?: return false
+        setUserDisconnected(false)
         scope.launch { reconnect(mac) }
         return true
+    }
+
+    /** The user picked a watch: connect to it and resume auto-reconnecting. */
+    fun connect(device: BluetoothDevice) {
+        setUserDisconnected(false)
+        // A retry still waiting to fire would tear this connection down.
+        reconnectJob?.cancel()
+        reconnectJob = null
+        ble.connect(device)
+    }
+
+    /**
+     * The user tapped Disconnect (or Cancel while reconnecting): drop the link
+     * and stay disconnected until they connect again. Going straight to the
+     * BLE layer made this look like any other drop, and it was reconnected
+     * 10 s later.
+     */
+    fun disconnect() {
+        setUserDisconnected(true)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        if (ble.state.value.connection is ConnectionState.Connected) {
+            ble.disconnect()
+        } else {
+            // No link up, so no disconnect callback to close the client:
+            // close it here, which also kills a pending auto-connect.
+            ble.close()
+        }
+    }
+
+    private fun setUserDisconnected(value: Boolean) {
+        _userDisconnected.value = value
+        prefs.edit().putBoolean(PREF_USER_DISCONNECTED, value).apply()
     }
 
     private suspend fun reconnect(mac: String) {
@@ -833,6 +878,7 @@ class VendorConnection @Inject constructor(
     companion object {
         private const val PREFS_NAME = "colorfit_vendor_prefs"
         private const val PREF_LAST_MAC = "last_connected_mac"
+        private const val PREF_USER_DISCONNECTED = "user_disconnected"
 
         /**
          * Profile pushed to the watch, and used for the phone-side

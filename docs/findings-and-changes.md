@@ -391,3 +391,21 @@ To pin it down, grab the log from the affected phone **before** reconnecting:
 (256 KiB held ~2.5 minutes on the moto g32), so first raise Developer options →
 Logger buffer sizes to 16M. A bug report taken with the Bluetooth HCI snoop log
 enabled also contains the raw ATT traffic.
+
+## 13. Manual Disconnect undone 10 s later (2026-10-17)
+
+Tapping Disconnect went straight to `BleConnectionManager`. The "user asked for
+it" flag lived in `HomeViewModel` and only changed the screen, so
+`VendorConnection` saw an ordinary drop and auto-reconnected after
+`AUTO_RECONNECT_DELAY_MS`; on every process start it also reconnected to the
+saved MAC regardless. Cancel while reconnecting had the same hole.
+
+Now `VendorConnection.disconnect()` sets a persisted `user_disconnected` flag,
+cancels any pending retry, and closes the client outright when no link is up, so
+a pending auto-connect can't complete. Every auto-reconnect path checks the
+flag; `connect()` and Reconnect clear it. `HomeViewModel.userInitiatedDisconnect`
+reads the same flag, so a relaunch after Disconnect shows the scan card instead
+of a "Reconnecting…" that never happens.
+
+Not changed: while a watch is remembered, the foreground service still starts at
+launch/boot even if the user left it disconnected.
