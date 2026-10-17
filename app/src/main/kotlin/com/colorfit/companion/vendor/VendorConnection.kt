@@ -409,16 +409,25 @@ class VendorConnection @Inject constructor(
         ble5: Boolean = false,
         timeoutMs: Long = COMMAND_TIMEOUT_MS,
         done: (ByteArray) -> Boolean = { it.isNotEmpty() && it[0] == payload[0] },
-    ): ByteArray? = commandMutex.withLock {
-        coroutineScope {
-            // Subscribe before writing so a fast reply can't be missed.
-            val reply = async(start = CoroutineStart.UNDISPATCHED) { rxFrames.first(done) }
-            if (!send(payload, ble5)) {
-                reply.cancel()
-                return@coroutineScope null
-            }
-            withTimeoutOrNull(timeoutMs) { reply.await() }.also { reply.cancel() }
+    ): ByteArray? = commandMutex.withLock { exchange(payload, ble5, timeoutMs, done) }
+
+    /**
+     * [request] for a caller that already holds [commandMutex] — for
+     * multi-frame transactions that nothing else may interrupt.
+     */
+    private suspend fun exchange(
+        payload: ByteArray,
+        ble5: Boolean = false,
+        timeoutMs: Long = COMMAND_TIMEOUT_MS,
+        done: (ByteArray) -> Boolean = { it.isNotEmpty() && it[0] == payload[0] },
+    ): ByteArray? = coroutineScope {
+        // Subscribe before writing so a fast reply can't be missed.
+        val reply = async(start = CoroutineStart.UNDISPATCHED) { rxFrames.first(done) }
+        if (!send(payload, ble5)) {
+            reply.cancel()
+            return@coroutineScope null
         }
+        withTimeoutOrNull(timeoutMs) { reply.await() }.also { reply.cancel() }
     }
 
     /** Fire-and-forget [request] for UI actions. */
@@ -440,7 +449,8 @@ class VendorConnection @Inject constructor(
      *
      * Like the original, each chunk waits for the watch's `C5 <index>`
      * acknowledgement before the next one goes out. Returns immediately; the
-     * push runs in the background, one message at a time.
+     * push runs in the background, one message at a time — a notification
+     * that arrives mid-push waits for the current one to finish.
      *
      * @param appType watch-side app id ([NotificationAppId.typeForPackage]).
      */
@@ -460,16 +470,24 @@ class VendorConnection @Inject constructor(
         )
         if (packets.isEmpty()) return
         scope.launch {
-            for (packet in packets) {
-                val index = packet[1].toInt() and 0xFF
-                // Wait for `C5 <index>` (`C5 FD …` for the terminator). A
-                // missed ack shouldn't strand the rest of the message: after
-                // the timeout carry on regardless.
-                request(packet, timeoutMs = COMMAND_TIMEOUT_MS) {
-                    it.opcode(packet[0].toInt() and 0xFF) && it.sub() == index
+            // Hold the command lock for the whole message, not per chunk.
+            // Per-chunk locking let two overlapping pushes alternate on the
+            // wire — `C5 00`(A) `C5 00`(B) `C5 01`(A) `C5 01`(B) … — feeding
+            // two texts into the watch's one message buffer. The original
+            // never sends that: it keeps a single buffer, so a newer message
+            // restarts at chunk 0 and the watch only ever sees one in order.
+            commandMutex.withLock {
+                for (packet in packets) {
+                    val index = packet[1].toInt() and 0xFF
+                    // Wait for `C5 <index>` (`C5 FD …` for the terminator). A
+                    // missed ack shouldn't strand the rest of the message: after
+                    // the timeout carry on regardless.
+                    exchange(packet, timeoutMs = COMMAND_TIMEOUT_MS) {
+                        it.opcode(packet[0].toInt() and 0xFF) && it.sub() == index
+                    }
                 }
+                exchange(VendorFrame.pushNotificationShort(alertType))
             }
-            request(VendorFrame.pushNotificationShort(alertType))
         }
     }
 
