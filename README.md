@@ -6,6 +6,17 @@ built from scratch because Noise doesn't publish a developer SDK.
 > This is a personal/hobby project. Reverse-engineered protocols may break with any
 > firmware update. Not affiliated with Noise.
 
+The project builds **two apps**, installable side by side so both watches can be
+connected at the same time:
+
+| Module | App | Watch | Protocol |
+|--------|-----|-------|----------|
+| `:app` | Colorfit Companion (`com.colorfit.companion`) | Vivid Call 2 | NoiseFit Prime / yc.pedometer — `docs/opcode-reference.md`, `docs/findings-and-changes.md` |
+| `:band` | ColorFit Band (`com.colorfit.band`) | "ColorFit" band | NoiseFit Track / MOYOUNG — `docs/band-protocol.md` |
+
+`./gradlew :band:testDebugUnitTest` checks the band's frame builders and parsers
+against bytes captured from NoiseFit Track's own session.
+
 ## Status — Phase 2 (vendor protocol)
 
 Phase 1 ships the BLE foundation. Phase 2 adds the Noise (yc.pedometer)
