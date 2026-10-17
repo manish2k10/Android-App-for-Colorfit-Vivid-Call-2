@@ -23,6 +23,7 @@ object BandCommands {
     const val WEATHER_TODAY_LEGACY = 0x43
     const val CITY = 0x45
     const val FIND_BAND = 0x61
+    const val DYNAMIC_HEART_RATE = 0x68
     const val BLOOD_PRESSURE = 0x69
     const val BLOOD_OXYGEN = 0x6B
     const val HEART_RATE = 0x6D
@@ -79,9 +80,13 @@ object BandCommands {
 
     fun findBand(): ByteArray = BandFrame.build(FIND_BAND)
 
-    /** `o0.h`: one heart-rate measurement. */
+    /**
+     * `o0.e`: continuous ("active") heart rate — NoiseFit Track's other
+     * heart-rate screen. Readings stream until stopped. The single-shot
+     * `0x6D` (`o0.h`) gets no answer at all from this band.
+     */
     fun measureHeartRate(start: Boolean): ByteArray =
-        BandFrame.build(HEART_RATE, byteArrayOf(if (start) 0 else -1))
+        BandFrame.build(DYNAMIC_HEART_RATE, byteArrayOf(if (start) 0 else -1))
 
     /** `y.e` / `y.f`. */
     fun measureBloodPressure(start: Boolean): ByteArray =

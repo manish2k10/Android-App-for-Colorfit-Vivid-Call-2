@@ -1,7 +1,8 @@
 # Colorfit Companion
 
-A Kotlin Android companion app for the **Noise Colorfit Vivid Call 2** smartwatch,
-built from scratch because Noise doesn't publish a developer SDK.
+Kotlin Android companion apps for two Noise watches — the **Colorfit Vivid Call 2**
+smartwatch and, new, the **ColorFit band** — built from scratch because Noise
+doesn't publish a developer SDK.
 
 > This is a personal/hobby project. Reverse-engineered protocols may break with any
 > firmware update. Not affiliated with Noise.
@@ -41,6 +42,61 @@ vendor protocol:
 
 Phase 3 (polish): historical-data UI, settings persistence, watch-face push.
 
+## ColorFit band app (`:band`) — new
+
+Support for a second watch: the Noise **"ColorFit" band**, the one the
+**NoiseFit Track** app (`com.crrepa.band.noise`) syncs with. It speaks a different
+protocol from the Vivid Call 2 — MOYOUNG's, the company behind Da Fit — so it is
+its own app, with its own icon (teal) and its own connection, and runs alongside
+the Vivid Call 2 app.
+
+The protocol was taken from NoiseFit Track (decompiled) and checked against a
+Bluetooth capture of NoiseFit Track's own session with the band; see
+`docs/band-protocol.md`.
+
+What it does:
+
+- Connects to the band and keeps it connected in the background; **Disconnect**
+  stays disconnected until you reconnect, and it reconnects by itself when
+  Bluetooth comes back on
+- Time and timezone sync on every connect
+- Battery, today's steps, distance and calories, plus the last two days' steps
+- Heart rate (live while measuring), blood pressure and SpO₂ measurements
+- Sleep for the last three nights (deep / light / REM / awake)
+- Today's heart rate in 5-minute steps, and the band's auto-measure interval
+  (off / 5 / 10 / 20 / 30 min)
+- Phone notifications on the band, with per-app switches
+- Weather (city lookup or your location) — sent on every connect and every 3 hours
+- Find band
+
+Before using it:
+
+1. **Force-stop NoiseFit Track** (or uninstall it) — two apps talking to the band
+   at once means double notifications and crossed commands.
+2. Give **ColorFit Band** notification access.
+3. Pick an auto heart-rate interval — the band keeps no heart-rate history while
+   it's off.
+
+Not yet confirmed on the band: notification push, Find band and the sleep
+parser (built from the decompiled app; the capture had no data for them). This
+band ignores the single-shot heart-rate command, so heart rate uses the band's
+continuous measurement.
+
+```
+band/src/main/kotlin/com/colorfit/band/
+├── BandApp.kt                      Application + Hilt; starts the session with the process
+├── BandSession.kt                  Paced command queue, handshake, replies → UI state, reconnects
+├── ble/BandGatt.kt                 GATT connection, serialized op queue, FEEA bring-up
+├── ble/                            Scanner, prefs, foreground service, boot receiver
+├── protocol/                       Pure Kotlin: frames, commands, parsers, notification text
+├── notify/                         Notification listener + per-app filter
+├── weather/WeatherService.kt       Open-Meteo fetch → band weather frames
+└── ui/                             Home, notification apps, permissions, theme
+```
+
+`./gradlew :band:testDebugUnitTest` replays frames and replies captured from
+NoiseFit Track's session and checks the builders and parsers byte for byte.
+
 ## Setup
 
 1. Install Android Studio (Iguana or later).
@@ -48,7 +104,9 @@ Phase 3 (polish): historical-data UI, settings persistence, watch-face push.
    - The Gradle wrapper jar isn't checked in; Studio will fetch it automatically.
      If you ever want to build from CLI, run `gradle wrapper --gradle-version 8.7`
      once and commit `gradle/wrapper/gradle-wrapper.jar` + `gradle-wrapper.properties`.
-3. Run the **app** configuration onto your phone (Android 8+).
+3. Run the **app** configuration (Vivid Call 2) or the **band** configuration
+   (ColorFit band) onto your phone (Android 8+). From the command line:
+   `./gradlew :app:assembleDebug` / `./gradlew :band:assembleDebug`.
 4. Grant the runtime permissions on the Permissions screen.
 5. Press **Start scan**, pick your watch, tap **Connect**.
 6. Press **Dump GATT table** — the JSON path is shown on the screen, copy it.
@@ -97,9 +155,12 @@ writes get painful.
   subscribe to notifications characteristic, send a custom notification.
 - **Phase 3 — Polish:** Material 3 settings screen, Health Connect export,
   workout history viewer.
+- **Second watch — ColorFit band:** ✅ added as the separate `:band` app
+  (MOYOUNG protocol, `docs/band-protocol.md`).
 
 ## Legal
 
-This project doesn't ship any Noise proprietary code or data. The watch's BLE
-advertising name is filtered on for usability, no other vendor identifiers
-are hard-coded.
+This project doesn't ship any Noise or MOYOUNG proprietary code. Protocol
+details (byte layouts, command ids, message types, the emoji table the band
+can't draw) were worked out from the vendor apps for interoperability and are
+re-implemented here.

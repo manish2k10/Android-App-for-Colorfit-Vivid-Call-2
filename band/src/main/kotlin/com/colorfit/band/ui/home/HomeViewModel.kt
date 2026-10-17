@@ -13,8 +13,8 @@ import com.colorfit.band.ble.BlePermissions
 import com.colorfit.band.ble.PowerSettings
 import com.colorfit.band.weather.WeatherService
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 @HiltViewModel
@@ -71,22 +72,25 @@ class HomeViewModel @Inject constructor(
         _scanning.value = true
         scanJob = viewModelScope.launch {
             try {
-                scanner.scan().collect { result ->
-                    // Named devices only — the band always advertises its name.
-                    if (runCatching { result.device.name }.getOrNull().isNullOrBlank()) return@collect
-                    _scanResults.update { list ->
-                        if (list.any { it.device.address == result.device.address }) list else list + result
+                // The timeout belongs to this scan, so a restarted scan isn't cut
+                // short by an earlier one's timer; it ends without throwing.
+                withTimeoutOrNull(SCAN_TIMEOUT_MS) {
+                    scanner.scan().collect { result ->
+                        // Named devices only — the band always advertises its name.
+                        if (runCatching { result.device.name }.getOrNull().isNullOrBlank()) return@collect
+                        _scanResults.update { list ->
+                            if (list.any { it.device.address == result.device.address }) list else list + result
+                        }
                     }
                 }
+            } catch (e: CancellationException) {
+                // Stopped by the user or the screen closing — not an error.
+                throw e
             } catch (e: Exception) {
-                _scanError.value = e.message
+                _scanError.value = e.message ?: "Scan failed"
             } finally {
                 _scanning.value = false
             }
-        }
-        viewModelScope.launch {
-            delay(SCAN_TIMEOUT_MS)
-            stopScan()
         }
     }
 

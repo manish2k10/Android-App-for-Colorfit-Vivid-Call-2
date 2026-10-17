@@ -59,6 +59,9 @@ class CaptureFramesTest {
         assertArrayEquals(hex("feea1006ab00"), BandCommands.heartRateLog())
         assertArrayEquals(hex("feea100869000000"), BandCommands.measureBloodPressure(true))
         assertArrayEquals(hex("feea100869ffffff"), BandCommands.measureBloodPressure(false))
+        // Continuous heart rate (`o0.e`); the band ignores the single-shot 6D.
+        assertArrayEquals(hex("feea10066800"), BandCommands.measureHeartRate(true))
+        assertArrayEquals(hex("feea100668ff"), BandCommands.measureHeartRate(false))
     }
 
     @Test fun packets_splitAt20Bytes() {

@@ -69,7 +69,8 @@ flag = 0x10 when the packet size is 20 (MTU 23); otherwise 0x20 | (len >> 8)
 | `45` | city UTF-8 (≤23 B) | — | [sdk `a1`][capture] |
 | `B3 04` | LE32 lat×10⁶, LE32 lon×10⁶ | — | [sdk `f0.b`][capture 22.496506, 88.40371] |
 | `61` | — | — | find band [sdk `u8/a.findDevice`] |
-| `6D` | `[00]` start / `[FF]` stop single heart rate | `6D <bpm>`; live values on `2A37` meanwhile | [sdk `o0.h`, `i9/a.f`] |
+| `68` | `[00]` start / `[FF]` stop continuous ("active") heart rate | `[bpm, 01]` live (`FF 01` = couldn't start), 1 byte ≥ `FD` = ended; live values also on `2A37` | [sdk `o0.e`, `i9/a.a0`][phone: used by the app] |
+| `6D` | `[00]` start / `[FF]` stop single heart rate | `6D <bpm>` — **this band never answers it** (no reply, no `2A37` stream, three tries 2026-10-18) | [sdk `o0.h`, `i9/a.f`][phone] |
 | `69` | `00 00 00` start / `FF FF FF` stop blood pressure | `69 00 <sys> <dia>` | [sdk `y.e/f`, `a9/n.c`][capture `69 00 79 4A` = 121/74] |
 | `6B` | `[00]` start / `[FF]` stop SpO₂ | `6B <percent>` | [sdk `v.c`, `i9/a.b3`][capture `6B 62` = 98 %] |
 | `AB` | `[00]` measured heart-rate log | `AB 00 ?` + 5-byte records `[bpm, LE32 seconds (GMT+8)]` | [sdk `o0.a`, `a9/j0.t`] |

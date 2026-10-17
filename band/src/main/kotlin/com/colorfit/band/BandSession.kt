@@ -313,6 +313,7 @@ class BandSession @Inject constructor(
             BandCommands.HEART_RATE -> BandParsers.singleValue(p)?.let { bpm ->
                 finish(Measurement.HEART_RATE) { it.copy(lastHeartRate = bpm) }
             }
+            BandCommands.DYNAMIC_HEART_RATE -> onDynamicHeartRate(p)
             BandCommands.BLOOD_PRESSURE -> BandParsers.bloodPressure(p)?.let { bp ->
                 finish(Measurement.BLOOD_PRESSURE) { it.copy(bloodPressure = bp) }
             }
@@ -327,8 +328,26 @@ class BandSession @Inject constructor(
         BandParsers.steps(value)?.let { s -> _state.update { it.copy(stepsToday = s) } }
     }
 
+    /** `2A37` — streamed while measuring, whether started here or on the band. */
     override fun onHeartRate(bpm: Int) {
-        _state.update { it.copy(liveHeartRate = bpm) }
+        _state.update { it.copy(liveHeartRate = bpm, lastHeartRate = bpm) }
+    }
+
+    /**
+     * `i9/a.a0`: `[bpm, 01]` is a live reading (`FF 01` = couldn't start), a
+     * longer reply carries the bpm first, and one byte ≥ `FD` means the band
+     * ended the measurement.
+     */
+    private fun onDynamicHeartRate(p: ByteArray) {
+        val first = p.firstOrNull()?.toInt()?.and(0xFF) ?: return
+        when {
+            p.size == 1 -> if (first >= 0xFD) finish(Measurement.HEART_RATE) { it }
+            first == 0xFF -> {
+                onError("The band couldn't start measuring — check it sits snugly on your wrist.")
+                finish(Measurement.HEART_RATE) { it }
+            }
+            first in 30..240 -> onHeartRate(first)
+        }
     }
 
     override fun onBattery(percent: Int) {
