@@ -64,10 +64,10 @@ class HomeViewModel @Inject constructor(
      * "I'm done, go back to the scan screen" from "the link dropped,
      * we're auto-reconnecting — stay on the connected view with a
      * reconnecting banner." The user only lands back on the scan
-     * screen when they ask to.
+     * screen when they ask to. Owned by [VendorConnection], which also
+     * holds off auto-reconnecting while it is set.
      */
-    private val _userInitiatedDisconnect = MutableStateFlow(false)
-    val userInitiatedDisconnect: StateFlow<Boolean> = _userInitiatedDisconnect.asStateFlow()
+    val userInitiatedDisconnect: StateFlow<Boolean> = vendor.userDisconnected
 
     /**
      * True while we're trying to reconnect to a previously-paired
@@ -133,9 +133,8 @@ class HomeViewModel @Inject constructor(
 
     fun connect(device: BluetoothDevice) {
         stopScan()
-        _userInitiatedDisconnect.value = false
         _reconnecting.value = false
-        connection.connect(device)
+        vendor.connect(device)
         BleForegroundService.startConnected(
             getApplication(),
             device.name ?: device.address,
@@ -143,9 +142,8 @@ class HomeViewModel @Inject constructor(
     }
 
     fun disconnect() {
-        _userInitiatedDisconnect.value = true
         _reconnecting.value = false
-        connection.disconnect()
+        vendor.disconnect()
         BleForegroundService.startDisconnected(getApplication())
     }
 
@@ -213,7 +211,6 @@ class HomeViewModel @Inject constructor(
         vendor.clearLastMac()
         connection.disconnect()
         _reconnecting.value = false
-        _userInitiatedDisconnect.value = true
         // Nothing left to keep alive for — tear the service down so the
         // persistent notification goes away.
         BleForegroundService.stop(getApplication())
@@ -231,8 +228,9 @@ class HomeViewModel @Inject constructor(
         // session), flip the UI into "reconnecting" immediately so the
         // scan card never flashes for half a second on relaunch. The
         // VendorConnection singleton schedules the actual BLE
-        // reconnect attempt in its own init block.
-        if (vendor.lastConnectedMac != null) {
+        // reconnect attempt in its own init block (unless the user left it
+        // disconnected).
+        if (vendor.lastConnectedMac != null && !vendor.userDisconnected.value) {
             _reconnecting.value = true
         }
         // Whenever the vendor handshake completes, auto-push weather if
@@ -254,7 +252,7 @@ class HomeViewModel @Inject constructor(
                 val connected = s.connection is ConnectionState.Connected
                 val idle = s.connection is ConnectionState.Idle ||
                     s.connection is ConnectionState.Disconnected
-                if (idle && !_userInitiatedDisconnect.value && vendor.lastConnectedMac != null) {
+                if (idle && !vendor.userDisconnected.value && vendor.lastConnectedMac != null) {
                     _reconnecting.value = true
                 } else if (connected) {
                     _reconnecting.value = false

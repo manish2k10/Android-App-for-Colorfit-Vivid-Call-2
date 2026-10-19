@@ -62,6 +62,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import android.content.Intent
@@ -464,9 +465,18 @@ private fun displayBatteryPercent(state: WatchState, vendorState: VendorState): 
 
 @Composable
 private fun InfoRow(label: String, value: String) {
-    Row {
-        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
+    // The label keeps its natural width and the value wraps in the space
+    // left over. The other way round, a long value (Features) took the whole
+    // row on narrow screens and crushed its label into the row above.
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.End,
+        )
     }
 }
 

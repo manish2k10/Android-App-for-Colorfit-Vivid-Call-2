@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">ColorFit Band</string>
+    <string name="notif_channel_ble">Band connection</string>
+    <string name="notif_channel_ble_desc">Keeps the connection to your ColorFit band alive in the background.</string>
+    <string name="notif_ble_title">ColorFit Band</string>
+    <string name="notif_ble_text">Connected to %1$s</string>
+    <string name="notif_ble_idle">Waiting for the band…</string>
+    <string name="notif_relay_label">ColorFit Band notification relay</string>
+</resources>

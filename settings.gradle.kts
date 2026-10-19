@@ -22,3 +22,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "ColorfitCompanion"
 include(":app")
+// The ColorFit band (MOYOUNG protocol) — a separate app so both watches can be
+// connected at once. See docs/band-protocol.md.
+include(":band")

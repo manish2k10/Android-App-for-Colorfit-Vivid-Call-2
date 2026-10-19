@@ -71,7 +71,8 @@ watch→phone: C5 <idx> after each chunk, C5 FD <type> <len> after the terminato
 * Message = `[appType, byteLength] + UTF-16BE("Title:Body")`, ≤160 bytes
   (`GBUtils.hexStringToBytess` + `string2unicode`). The 2-byte header was missing
   from this app before; without it the watch reads the first character as type+length.
-* Emoji, control chars and U+2005 are dropped (`string2unicode`).
+* Emoji, control chars and U+2005 are dropped (`EmojiUtil.filterEmoji` +
+  `string2unicode`). The emoji set is wider than surrogate pairs — see §11.
 * Real example (Telegram, `0x18`): `C5 00 18 4E 0054 0065 …` [capture].
 * App type byte comes from `StatusbarMsgNotificationListener.getAppType()`; it
   picks the icon. Telegram (24) and Gmail (19) are confirmed in the capture; the
@@ -334,3 +335,77 @@ the manual steps.
 New files: `ble/WatchPrefs.kt`, `ble/PowerSettings.kt`, `ble/BootReceiver.kt`.
 Touched: `AndroidManifest.xml`, `App.kt`, `BleForegroundService.kt`,
 `HomeViewModel.kt`, `HomeScreen.kt`.
+
+## 11. Garbled notification text (2026-10-17)
+
+Report: one WhatsApp notification arrived garbled on the watch. It was not
+captured — the phone on adb that day (moto g32 `ZD222K9NZD`) has no WhatsApp,
+was still running the 10-03 build, and had not connected this app to the watch
+since 10-04. Two definite differences from the original produce garbled text;
+both are fixed. Which one hit that message is not known.
+
+* **Character filter too narrow** [java, read from the dex]. The original runs
+  `EmojiUtil.filterEmoji()` before `string2unicode()`. Besides surrogate pairs it
+  removes © ® ™ 〰, U+2328, U+23E9–23FA, U+25B6–27BF (☀ ☺ ♥ ⚡ ✅ ✨ ❤ …),
+  ⭐ U+2B50, **U+200D** (zero-width joiner) and **U+FE0F** (emoji variation
+  selector), then ⛄/☔ and a trailing space. This app dropped only control chars,
+  U+2005 and surrogates, so "❤️" went out as `2764 FE0F` and "🤦‍♂️" as
+  `200D 2642 FE0F`. `VendorFrame.sanitizeForWatch` now matches the bytecode
+  (checked over all 65 536 UTF-16 code units).
+  **JADX misprints `isEmojiCharacter`**: it truncates the constants to 16 bits,
+  so `0x10000` reads as `0` and the astral bounds `0x1F000`/`0x1F601` as
+  `61440`/`62977`. Use `dexdump -d` on that method, not the Java.
+* **Overlapping pushes interleaved.** `pushNotification` took the command lock
+  per chunk, so two notifications in flight alternated on the wire:
+  `C5 00`(A) `C5 00`(B) `C5 01`(A) `C5 01`(B) … The original never sends that
+  [capture]: of 248 messages, 59 were cut short by a newer one, which always
+  restarted at `C5 00`, and only 1 had any other command between its chunks.
+  Each push now holds the lock from its first chunk to the vibration; later
+  ones queue in order.
+
+Seen in the Java but not acted on (never in the capture): a `C5 FF` reply means
+"resend from chunk 0", and the original restarts the message; this app waits
+out the 3 s timeout and continues. Also, on this watch the original caps text at
+240 bytes (`isSupportFunction_Sixth(4194304)`; the capture has chunk indices up
+to `0D`) where this app caps at 160 — long messages are cut shorter, not garbled.
+
+## 12. "Watch connected, no data" after a long disconnection — not resolved
+
+Reported: after the watch has been away from the app for a long time it shows
+connected but no data arrives until Disconnect → reconnect. Not captured (same
+phone problem as §11), so nothing was changed. Gaps in the code that would give
+exactly that symptom — none confirmed:
+
+* `onServicesDiscovered` with a failure status only records an error, and if the
+  callback never comes nothing notices. Either way the link stays up with no
+  notifications enabled and no handshake; there is no timeout or retry.
+* `onDescriptorWrite` ignores its status, so a failed notify-enable on `33F2`
+  goes unnoticed; every request then times out and the handshake still reaches
+  READY.
+* `reconnect()` gives up for good when Bluetooth is off at the moment it fires,
+  and nothing listens for Bluetooth coming back on (no `ACTION_STATE_CHANGED`
+  receiver).
+
+To pin it down, grab the log from the affected phone **before** reconnecting:
+`adb logcat -d -s BleGatt:V > stuck.txt`. The default log buffer is tiny
+(256 KiB held ~2.5 minutes on the moto g32), so first raise Developer options →
+Logger buffer sizes to 16M. A bug report taken with the Bluetooth HCI snoop log
+enabled also contains the raw ATT traffic.
+
+## 13. Manual Disconnect undone 10 s later (2026-10-17)
+
+Tapping Disconnect went straight to `BleConnectionManager`. The "user asked for
+it" flag lived in `HomeViewModel` and only changed the screen, so
+`VendorConnection` saw an ordinary drop and auto-reconnected after
+`AUTO_RECONNECT_DELAY_MS`; on every process start it also reconnected to the
+saved MAC regardless. Cancel while reconnecting had the same hole.
+
+Now `VendorConnection.disconnect()` sets a persisted `user_disconnected` flag,
+cancels any pending retry, and closes the client outright when no link is up, so
+a pending auto-connect can't complete. Every auto-reconnect path checks the
+flag; `connect()` and Reconnect clear it. `HomeViewModel.userInitiatedDisconnect`
+reads the same flag, so a relaunch after Disconnect shows the scan card instead
+of a "Reconnecting…" that never happens.
+
+Not changed: while a watch is remembered, the foreground service still starts at
+launch/boot even if the user left it disconnected.

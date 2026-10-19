@@ -112,6 +112,14 @@ class VendorConnection @Inject constructor(
     private var reconnectJob: Job? = null
 
     /**
+     * Set while the user has chosen to stay disconnected (tapped Disconnect),
+     * so neither the link drop that follows nor a later process start
+     * auto-reconnects. Persisted; cleared when they connect again.
+     */
+    private val _userDisconnected = MutableStateFlow(prefs.getBoolean(PREF_USER_DISCONNECTED, false))
+    val userDisconnected: StateFlow<Boolean> = _userDisconnected.asStateFlow()
+
+    /**
      * Guards [finishAuth] so time-sync + profile + live/history sync run
      * exactly once per connection, even though it can be reached from both
      * the auth-success response and the optimistic fallback timer. Reset on
@@ -167,9 +175,11 @@ class VendorConnection @Inject constructor(
             // observe `lastConnectedMac` and immediately flip their
             // "reconnecting" indicator on, so the user never sees the
             // scan card on relaunch.
-            reconnectJob = scope.launch {
-                delay(AUTO_RECONNECT_DELAY_MS)
-                reconnect(savedMac)
+            if (!_userDisconnected.value) {
+                reconnectJob = scope.launch {
+                    delay(AUTO_RECONNECT_DELAY_MS)
+                    reconnect(savedMac)
+                }
             }
         }
         // Watch the standard state so we can kick off the handshake after
@@ -204,9 +214,10 @@ class VendorConnection @Inject constructor(
                         syncStarted.set(false)
                         // Auto-reconnect: cheap Chinese watches drop idle
                         // connections aggressively. If we have a MAC we
-                        // bonded with, retry after a short delay.
+                        // bonded with, retry after a short delay — unless
+                        // the user disconnected on purpose.
                         val mac = lastConnectedMac
-                        if (mac != null && reconnectJob?.isActive != true) {
+                        if (mac != null && !_userDisconnected.value && reconnectJob?.isActive != true) {
                             Timber.tag(TAG).i("link down (%s), reconnecting in %d ms", c, AUTO_RECONNECT_DELAY_MS)
                             reconnectJob = scope.launch {
                                 delay(AUTO_RECONNECT_DELAY_MS)
@@ -244,8 +255,42 @@ class VendorConnection @Inject constructor(
     fun reconnectNow(): Boolean {
         val mac = lastConnectedMac ?: return false
         Timber.tag(TAG).i("reconnect requested by user")
+        setUserDisconnected(false)
         scope.launch { reconnect(mac) }
         return true
+    }
+
+    /** The user picked a watch: connect to it and resume auto-reconnecting. */
+    fun connect(device: BluetoothDevice) {
+        setUserDisconnected(false)
+        // A retry still waiting to fire would tear this connection down.
+        reconnectJob?.cancel()
+        reconnectJob = null
+        ble.connect(device)
+    }
+
+    /**
+     * The user tapped Disconnect (or Cancel while reconnecting): drop the link
+     * and stay disconnected until they connect again. Going straight to the
+     * BLE layer made this look like any other drop, and it was reconnected
+     * 10 s later.
+     */
+    fun disconnect() {
+        setUserDisconnected(true)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        if (ble.state.value.connection is ConnectionState.Connected) {
+            ble.disconnect()
+        } else {
+            // No link up, so no disconnect callback to close the client:
+            // close it here, which also kills a pending auto-connect.
+            ble.close()
+        }
+    }
+
+    private fun setUserDisconnected(value: Boolean) {
+        _userDisconnected.value = value
+        prefs.edit().putBoolean(PREF_USER_DISCONNECTED, value).apply()
     }
 
     private suspend fun reconnect(mac: String) {
@@ -420,16 +465,25 @@ class VendorConnection @Inject constructor(
         ble5: Boolean = false,
         timeoutMs: Long = COMMAND_TIMEOUT_MS,
         done: (ByteArray) -> Boolean = { it.isNotEmpty() && it[0] == payload[0] },
-    ): ByteArray? = commandMutex.withLock {
-        coroutineScope {
-            // Subscribe before writing so a fast reply can't be missed.
-            val reply = async(start = CoroutineStart.UNDISPATCHED) { rxFrames.first(done) }
-            if (!send(payload, ble5)) {
-                reply.cancel()
-                return@coroutineScope null
-            }
-            withTimeoutOrNull(timeoutMs) { reply.await() }.also { reply.cancel() }
+    ): ByteArray? = commandMutex.withLock { exchange(payload, ble5, timeoutMs, done) }
+
+    /**
+     * [request] for a caller that already holds [commandMutex] — for
+     * multi-frame transactions that nothing else may interrupt.
+     */
+    private suspend fun exchange(
+        payload: ByteArray,
+        ble5: Boolean = false,
+        timeoutMs: Long = COMMAND_TIMEOUT_MS,
+        done: (ByteArray) -> Boolean = { it.isNotEmpty() && it[0] == payload[0] },
+    ): ByteArray? = coroutineScope {
+        // Subscribe before writing so a fast reply can't be missed.
+        val reply = async(start = CoroutineStart.UNDISPATCHED) { rxFrames.first(done) }
+        if (!send(payload, ble5)) {
+            reply.cancel()
+            return@coroutineScope null
         }
+        withTimeoutOrNull(timeoutMs) { reply.await() }.also { reply.cancel() }
     }
 
     /** Fire-and-forget [request] for UI actions. */
@@ -451,7 +505,8 @@ class VendorConnection @Inject constructor(
      *
      * Like the original, each chunk waits for the watch's `C5 <index>`
      * acknowledgement before the next one goes out. Returns immediately; the
-     * push runs in the background, one message at a time.
+     * push runs in the background, one message at a time — a notification
+     * that arrives mid-push waits for the current one to finish.
      *
      * @param appType watch-side app id ([NotificationAppId.typeForPackage]).
      */
@@ -471,16 +526,24 @@ class VendorConnection @Inject constructor(
         )
         if (packets.isEmpty()) return
         scope.launch {
-            for (packet in packets) {
-                val index = packet[1].toInt() and 0xFF
-                // Wait for `C5 <index>` (`C5 FD …` for the terminator). A
-                // missed ack shouldn't strand the rest of the message: after
-                // the timeout carry on regardless.
-                request(packet, timeoutMs = COMMAND_TIMEOUT_MS) {
-                    it.opcode(packet[0].toInt() and 0xFF) && it.sub() == index
+            // Hold the command lock for the whole message, not per chunk.
+            // Per-chunk locking let two overlapping pushes alternate on the
+            // wire — `C5 00`(A) `C5 00`(B) `C5 01`(A) `C5 01`(B) … — feeding
+            // two texts into the watch's one message buffer. The original
+            // never sends that: it keeps a single buffer, so a newer message
+            // restarts at chunk 0 and the watch only ever sees one in order.
+            commandMutex.withLock {
+                for (packet in packets) {
+                    val index = packet[1].toInt() and 0xFF
+                    // Wait for `C5 <index>` (`C5 FD …` for the terminator). A
+                    // missed ack shouldn't strand the rest of the message: after
+                    // the timeout carry on regardless.
+                    exchange(packet, timeoutMs = COMMAND_TIMEOUT_MS) {
+                        it.opcode(packet[0].toInt() and 0xFF) && it.sub() == index
+                    }
                 }
+                exchange(VendorFrame.pushNotificationShort(alertType))
             }
-            request(VendorFrame.pushNotificationShort(alertType))
         }
     }
 
@@ -826,6 +889,7 @@ class VendorConnection @Inject constructor(
     companion object {
         private const val PREFS_NAME = "colorfit_vendor_prefs"
         private const val PREF_LAST_MAC = "last_connected_mac"
+        private const val PREF_USER_DISCONNECTED = "user_disconnected"
 
         /**
          * Profile pushed to the watch, and used for the phone-side

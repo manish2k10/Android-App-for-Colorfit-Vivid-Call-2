@@ -400,19 +400,47 @@ object VendorFrame {
     }
 
     /**
-     * Mirrors the character filter in `GBUtils.string2unicode()`: drop
-     * control chars, the C1 block, U+2005, and anything outside the BMP
-     * (emoji), which the watch's font can't render.
+     * The original's text filter, applied in the same two passes:
+     *
+     *  1. `EmojiUtil.filterEmoji()` drops every char [isEmojiChar] flags.
+     *  2. `GBUtils.string2unicode()` then drops control chars, the C1 block,
+     *     U+2005, ⛄ (U+26C4), ☔ (U+2614) and a trailing space.
+     *
+     * The watch's font has no glyphs for what these remove, and they are
+     * everyday chat text: "❤️" is U+2764 U+FE0F and "🤦‍♂️" leaves
+     * U+200D U+2642 U+FE0F once its surrogate pair is gone — the original
+     * sends none of it.
      */
-    private fun sanitizeForWatch(s: String): String = buildString {
-        for (ch in s) {
-            val c = ch.code
-            if (c < 0x20) continue
-            if (c in 0x7F..0x9F) continue
-            if (c == 0x2005) continue
-            if (ch.isHighSurrogate() || ch.isLowSurrogate()) continue
-            append(ch)
+    private fun sanitizeForWatch(s: String): String {
+        val noEmoji = s.filterNot { isEmojiChar(it.code) }
+        return buildString {
+            noEmoji.forEachIndexed { i, ch ->
+                val c = ch.code
+                if (c < 0x20 || c in 0x7F..0x9F) return@forEachIndexed
+                if (c == 0x2005 || c == 0x26C4 || c == 0x2614) return@forEachIndexed
+                if (i == noEmoji.lastIndex && c <= 0x20) return@forEachIndexed
+                append(ch)
+            }
         }
+    }
+
+    /**
+     * `EmojiUtil.isEmojiCharacter()` as the 1.1.20 bytecode runs it. JADX
+     * truncates its constants to 16 bits, so it prints the astral bounds
+     * `0x1F000..0x1FFFF` and `0x1F601..0x1F64F` as `0xF000..` / `0xF601..`
+     * and `c >= 0x10000` as `c >= 0`. Those ranges can never match a
+     * `char`, so they are left out here.
+     */
+    private fun isEmojiChar(c: Int): Boolean {
+        val xmlChar = c == 0x0 || c == 0x9 || c == 0xA || c == 0xD ||
+            c in 0x20..0xD7FF || c in 0xE000..0xFFFD
+        // Remaining C0 controls, surrogates (every astral emoji) and U+FFFE/F.
+        if (!xmlChar) return true
+        return c == 0xA9 || c == 0xAE || c == 0x2122 || c == 0x3030 || // © ® ™ 〰
+            c == 0x2328 || c in 0x23E9..0x23FA ||                     // ⌨, ⏩ … ⏺
+            c in 0x25B6..0x27BF ||                                    // ▶ … ☀ ☺ ♥ ⚡ ✅ ✨ ❤ ➿
+            c == 0x2B50 ||                                            // ⭐
+            c == 0x200D || c == 0xFE0F                                // ZWJ, emoji variation selector
     }
 
     // ───────── Weather ─────────────────────────────────────────────────────
