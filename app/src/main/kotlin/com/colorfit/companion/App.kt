@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import android.os.Process
 import com.colorfit.companion.ble.BleForegroundService
 import com.colorfit.companion.ble.WatchPrefs
 import dagger.hilt.android.HiltAndroidApp
@@ -15,6 +16,13 @@ class App : Application() {
         super.onCreate()
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
+            // The phone's logcat only holds a few minutes; keep a rolling file
+            // too so connection trouble can be read after the fact.
+            Timber.plant(FileLoggingTree(this))
+            // Marks restarts in the file, and which install wrote what follows.
+            @Suppress("DEPRECATION") // the PackageInfoFlags overload needs API 33
+            val installed = packageManager.getPackageInfo(packageName, 0).lastUpdateTime
+            Timber.tag("App").i("process start, pid %d, APK installed %tF %<tT", Process.myPid(), installed)
         }
         createBleChannel()
         // If we already know a watch, bring the foreground service up as soon

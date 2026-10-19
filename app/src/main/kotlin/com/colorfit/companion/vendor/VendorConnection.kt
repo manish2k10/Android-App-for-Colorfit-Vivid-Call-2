@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import timber.log.Timber
 import java.io.ByteArrayOutputStream
 import java.util.Calendar
 import java.util.concurrent.atomic.AtomicBoolean
@@ -206,6 +207,7 @@ class VendorConnection @Inject constructor(
                         // bonded with, retry after a short delay.
                         val mac = lastConnectedMac
                         if (mac != null && reconnectJob?.isActive != true) {
+                            Timber.tag(TAG).i("link down (%s), reconnecting in %d ms", c, AUTO_RECONNECT_DELAY_MS)
                             reconnectJob = scope.launch {
                                 delay(AUTO_RECONNECT_DELAY_MS)
                                 reconnect(mac)
@@ -216,6 +218,8 @@ class VendorConnection @Inject constructor(
                 }
             }
         }
+        // Every phase change, for the debug log file.
+        scope.launch { _phase.collect { Timber.tag(TAG).i("phase %s", it) } }
     }
 
     /** Persist the MAC we successfully bonded to, so we can find it next launch. */
@@ -239,18 +243,22 @@ class VendorConnection @Inject constructor(
     /** Force a reconnect to the last bonded watch. Returns true if scheduled. */
     fun reconnectNow(): Boolean {
         val mac = lastConnectedMac ?: return false
+        Timber.tag(TAG).i("reconnect requested by user")
         scope.launch { reconnect(mac) }
         return true
     }
 
     private suspend fun reconnect(mac: String) {
+        Timber.tag(TAG).i("reconnect to %s", mac)
         val adapter = context.getSystemService(Context.BLUETOOTH_SERVICE)
             ?.let { it as? BluetoothManager }?.adapter
             ?: run {
+                Timber.tag(TAG).w("reconnect: Bluetooth adapter unavailable")
                 _errors.update { it + "Bluetooth adapter unavailable for reconnect" }
                 return
             }
         if (!adapter.isEnabled) {
+            Timber.tag(TAG).w("reconnect: Bluetooth is off (adapter state %d)", adapter.state)
             _errors.update { it + "Bluetooth is off — can't reconnect to $mac" }
             return
         }
@@ -261,8 +269,10 @@ class VendorConnection @Inject constructor(
             // power-saving watch to reappear instead of timing out (133).
             ble.connect(device, autoConnect = true)
         } catch (e: SecurityException) {
+            Timber.tag(TAG).w(e, "reconnect: missing BLUETOOTH_CONNECT")
             _errors.update { it + "Missing BLUETOOTH_CONNECT permission for reconnect" }
         } catch (e: IllegalArgumentException) {
+            Timber.tag(TAG).w(e, "reconnect: bad MAC %s", mac)
             _errors.update { it + "Bad MAC for reconnect: $mac" }
         }
     }
@@ -308,6 +318,7 @@ class VendorConnection @Inject constructor(
      * [finishAuth].
      */
     private suspend fun startHandshake() {
+        Timber.tag(TAG).i("notifications ready; handshake runs only from IDLE, phase is %s", _phase.value)
         if (_phase.value != Phase.IDLE) return
         syncStarted.set(false)
         _phase.value = Phase.AUTHENTICATING
@@ -946,3 +957,5 @@ data class VendorState(
     val pushCapability: PushCapability = PushCapability.UNKNOWN,
     val errors: List<String> = emptyList(),
 )
+
+private const val TAG = "Vendor"

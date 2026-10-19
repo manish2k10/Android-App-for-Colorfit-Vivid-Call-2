@@ -250,6 +250,8 @@ class BleConnectionManager @Inject constructor(
 
         @SuppressLint("MissingPermission")
         val g = device.connectGatt(context, autoConnect, callback, BluetoothDevice.TRANSPORT_LE)
+        Timber.tag(TAG).i("connect %s autoConnect=%s%s", device.address, autoConnect,
+            if (g == null) " failed: connectGatt returned null" else "")
         gatt = g
         _state.update {
             it.copy(
@@ -261,10 +263,12 @@ class BleConnectionManager @Inject constructor(
     }
 
     fun disconnect() {
+        Timber.tag(TAG).i("disconnect requested, gatt open=%s", gatt != null)
         gatt?.let { runCatching { it.disconnect() } }
     }
 
     fun close() {
+        Timber.tag(TAG).i("close")
         closeGatt()
         _state.update { WatchState() }
     }
@@ -290,7 +294,10 @@ class BleConnectionManager @Inject constructor(
      *   sent to `34F1` get no reply at all.
      */
     fun writeVendorCommand(payload: ByteArray, ble5: Boolean = false): Boolean {
-        if (resolveVendorWriteChar(ble5) == null) return false
+        if (resolveVendorWriteChar(ble5) == null) {
+            Timber.tag(TAG).w("vendor write dropped, no write characteristic (gatt open=%s)", gatt != null)
+            return false
+        }
         // Resolve again when the op runs: by then the bring-up may have found
         // the legacy service blocked, and the write must fall back to 34F1.
         enqueueOp("vendorWrite[${payload.size}]") {
@@ -381,7 +388,8 @@ class BleConnectionManager @Inject constructor(
 
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            Timber.tag(TAG).i("connection state=%d status=%d", newState, status)
+            // current=false means a callback from an earlier, replaced client.
+            Timber.tag(TAG).i("connection state=%d status=%d current=%s", newState, status, g === gatt)
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 resetOps()
                 readyDispatched = false
@@ -398,7 +406,11 @@ class BleConnectionManager @Inject constructor(
                 // Higher connection priority improves throughput/stability during sync.
                 runCatching { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
                 runCatching { g.discoverServices() }
-                    .onFailure { e -> _state.update { it.copy(errors = it.errors + "discoverServices failed: ${e.message}") } }
+                    .onSuccess { started -> Timber.tag(TAG).i("discoverServices started=%s", started) }
+                    .onFailure { e ->
+                        Timber.tag(TAG).w(e, "discoverServices threw")
+                        _state.update { it.copy(errors = it.errors + "discoverServices failed: ${e.message}") }
+                    }
             } else {
                 // Any disconnect, or an error while connecting: close the client
                 // so its interface is freed (otherwise reconnects fail with 133).
@@ -416,6 +428,7 @@ class BleConnectionManager @Inject constructor(
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                Timber.tag(TAG).w("service discovery failed, status=%d", status)
                 _state.update { it.copy(errors = it.errors + "Service discovery failed: $status") }
                 return
             }
@@ -547,6 +560,7 @@ class BleConnectionManager @Inject constructor(
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            Timber.tag(TAG).v("mtu %d status=%d", mtu, status)
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 _state.update { it.copy(mtu = mtu) }
             }
