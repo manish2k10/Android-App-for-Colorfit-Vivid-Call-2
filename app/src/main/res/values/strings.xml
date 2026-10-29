@@ -5,5 +5,9 @@
     <string name="notif_ble_title">Colorfit Companion</string>
     <string name="notif_ble_text">Connected to %1$s</string>
     <string name="notif_ble_scanning">Scanning for watch…</string>
+    <string name="notif_ble_connecting">Connecting to %1$s…</string>
+    <string name="notif_ble_reconnecting">Reconnecting to your watch…</string>
+    <string name="notif_ble_bluetooth_off">Bluetooth is off — reconnects when it is back on</string>
+    <string name="notif_ble_not_connected">Not connected</string>
     <string name="notif_relay_label">Colorfit notification relay</string>
 </resources>

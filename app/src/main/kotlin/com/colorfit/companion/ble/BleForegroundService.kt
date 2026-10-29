@@ -10,10 +10,18 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.lifecycleScope
 import com.colorfit.companion.App
 import com.colorfit.companion.MainActivity
 import com.colorfit.companion.R
+import com.colorfit.companion.domain.ConnectionState
+import com.colorfit.companion.vendor.ReconnectStatus
+import com.colorfit.companion.vendor.VendorConnection
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
 
@@ -28,24 +36,29 @@ import javax.inject.Inject
 class BleForegroundService : LifecycleService() {
 
     @Inject lateinit var connection: BleConnectionManager
+    @Inject lateinit var vendor: VendorConnection
+
+    private var followJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
-        startInForegroundCompat("Idle", getString(R.string.notif_ble_scanning))
+        postCurrentState()
+        // The text follows the link itself. Auto-reconnects (after a reboot, a
+        // drop, Bluetooth coming back) send no intent, so with intent-driven
+        // text the notification said "Scanning for watch…" while connected.
+        followJob = lifecycleScope.launch {
+            combine(connection.state, vendor.reconnectStatus) { s, r -> notificationText(s.connection, r) }
+                .distinctUntilChanged()
+                .collect { (title, text) -> startInForegroundCompat(title, text) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
-            ACTION_CONNECTED -> startInForegroundCompat(
-                intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "Watch",
-                getString(R.string.notif_ble_text, intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "Watch"),
-            )
-            ACTION_DISCONNECTED -> startInForegroundCompat(
-                getString(R.string.notif_ble_title),
-                getString(R.string.notif_ble_scanning),
-            )
             ACTION_STOP -> {
+                // Stop following first, or closing the link re-posts the notification.
+                followJob?.cancel()
                 connection.close()
                 ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -54,10 +67,7 @@ class BleForegroundService : LifecycleService() {
             }
             // ACTION_START, or a null intent from a sticky restart after the
             // process was killed: just re-assert foreground so we keep living.
-            else -> startInForegroundCompat(
-                getString(R.string.notif_ble_title),
-                getString(R.string.notif_ble_scanning),
-            )
+            else -> postCurrentState()
         }
         // START_STICKY: if the OS kills us for memory, recreate the service
         // (with a null intent, handled above) as soon as it can.
@@ -67,6 +77,27 @@ class BleForegroundService : LifecycleService() {
     override fun onBind(intent: Intent): IBinder? {
         super.onBind(intent)
         return null
+    }
+
+    private fun postCurrentState() {
+        val (title, text) = notificationText(connection.state.value.connection, vendor.reconnectStatus.value)
+        startInForegroundCompat(title, text)
+    }
+
+    /** Title and text for the current link state. */
+    private fun notificationText(c: ConnectionState, reconnect: ReconnectStatus): Pair<String, String> {
+        val appName = getString(R.string.notif_ble_title)
+        return when (c) {
+            is ConnectionState.Connected -> c.deviceName to getString(R.string.notif_ble_text, c.deviceName)
+            is ConnectionState.Connecting -> appName to getString(R.string.notif_ble_connecting, c.deviceName)
+            ConnectionState.Scanning -> appName to getString(R.string.notif_ble_scanning)
+            is ConnectionState.Error -> appName to c.message
+            ConnectionState.Disconnected, ConnectionState.Idle -> appName to when (reconnect) {
+                ReconnectStatus.RETRYING -> getString(R.string.notif_ble_reconnecting)
+                ReconnectStatus.WAITING_FOR_BLUETOOTH -> getString(R.string.notif_ble_bluetooth_off)
+                else -> getString(R.string.notif_ble_not_connected)
+            }
+        }
     }
 
     private fun startInForegroundCompat(title: String, text: String) {
@@ -111,28 +142,20 @@ class BleForegroundService : LifecycleService() {
         const val NOTIF_ID = 0xCF01
 
         const val ACTION_START = "com.colorfit.companion.action.START"
-        const val ACTION_CONNECTED = "com.colorfit.companion.action.CONNECTED"
-        const val ACTION_DISCONNECTED = "com.colorfit.companion.action.DISCONNECTED"
         const val ACTION_STOP = "com.colorfit.companion.action.STOP"
-        const val EXTRA_DEVICE_NAME = "device_name"
 
         /**
-         * Ensure the service is running and foreground. Used at app launch and
-         * after boot so the process stays alive while we auto-reconnect in the
-         * background — not just while actively connected.
+         * Ensure the service is running and foreground. Used at app launch,
+         * after boot and on connect/disconnect, so the process stays alive while
+         * we auto-reconnect in the background — not just while actively
+         * connected. The notification text tracks the link by itself.
          */
         fun start(ctx: Context) = launch(ctx, ACTION_START)
 
-        fun startConnected(ctx: Context, deviceName: String) = launch(ctx, ACTION_CONNECTED) {
-            it.putExtra(EXTRA_DEVICE_NAME, deviceName)
-        }
-
-        fun startDisconnected(ctx: Context) = launch(ctx, ACTION_DISCONNECTED)
-
         fun stop(ctx: Context) = launch(ctx, ACTION_STOP)
 
-        private inline fun launch(ctx: Context, action: String, extras: (Intent) -> Unit = {}) {
-            val intent = Intent(ctx, BleForegroundService::class.java).setAction(action).also(extras)
+        private fun launch(ctx: Context, action: String) {
+            val intent = Intent(ctx, BleForegroundService::class.java).setAction(action)
             // startForegroundService (not startService) is required on API 26+;
             // the service then has ~5s to call startForeground, which it does
             // in onCreate / onStartCommand. Guard against the background-start

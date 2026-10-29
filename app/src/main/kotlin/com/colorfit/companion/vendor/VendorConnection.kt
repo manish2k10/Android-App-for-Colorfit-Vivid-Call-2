@@ -4,8 +4,12 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.colorfit.companion.ble.BleConnectionManager
 import com.colorfit.companion.domain.ConnectionState
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -120,6 +124,30 @@ class VendorConnection @Inject constructor(
     val userDisconnected: StateFlow<Boolean> = _userDisconnected.asStateFlow()
 
     /**
+     * What auto-reconnect is actually doing, so the UI never claims to be
+     * retrying when nothing is scheduled — it once showed "Reconnecting…"
+     * for 25 h after a retry had found Bluetooth off and given up.
+     */
+    private val _reconnectStatus = MutableStateFlow(ReconnectStatus.IDLE)
+    val reconnectStatus: StateFlow<ReconnectStatus> = _reconnectStatus.asStateFlow()
+
+    /**
+     * Bluetooth going off kills the link and any pending auto-connect, and a
+     * retry that finds it off can only give up. So park while it is off and
+     * reconnect when it comes back. After a reboot the stack comes up seconds
+     * after this process does: on 10-28 the launch retry hit adapter state 10
+     * and, with nothing listening, the app never tried again.
+     */
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> onBluetoothOff()
+                BluetoothAdapter.STATE_ON -> onBluetoothOn()
+            }
+        }
+    }
+
+    /**
      * Guards [finishAuth] so time-sync + profile + live/history sync run
      * exactly once per connection, even though it can be reached from both
      * the auth-success response and the optimistic fallback timer. Reset on
@@ -164,6 +192,14 @@ class VendorConnection @Inject constructor(
         ble.setNotificationsReadyListener {
             scope.launch { startHandshake() }
         }
+        // Registered before the launch retry below, so a Bluetooth stack that
+        // is still starting up (boot) can't slip past both.
+        ContextCompat.registerReceiver(
+            context,
+            bluetoothStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         // Restore the last bonded MAC and kick off an immediate reconnect
         // attempt on launch. Cheap watches don't survive process death
         // (or task switches to other apps) without this — the user would
@@ -176,10 +212,7 @@ class VendorConnection @Inject constructor(
             // "reconnecting" indicator on, so the user never sees the
             // scan card on relaunch.
             if (!_userDisconnected.value) {
-                reconnectJob = scope.launch {
-                    delay(AUTO_RECONNECT_DELAY_MS)
-                    reconnect(savedMac)
-                }
+                scheduleReconnect(savedMac, AUTO_RECONNECT_DELAY_MS)
             }
         }
         // Watch the standard state so we can kick off the handshake after
@@ -194,6 +227,7 @@ class VendorConnection @Inject constructor(
                         // service discovery + notification enablement complete.
                         lastConnectedMac = c.macAddress
                         persistLastMac(c.macAddress)
+                        _reconnectStatus.value = ReconnectStatus.IDLE
                     }
                     ConnectionState.Disconnected, ConnectionState.Idle -> {
                         if (_phase.value != Phase.IDLE) {
@@ -215,15 +249,20 @@ class VendorConnection @Inject constructor(
                         // Auto-reconnect: cheap Chinese watches drop idle
                         // connections aggressively. If we have a MAC we
                         // bonded with, retry after a short delay — unless
-                        // the user disconnected on purpose.
+                        // the user disconnected on purpose. While Bluetooth
+                        // is off the state receiver reconnects once it's back.
                         val mac = lastConnectedMac
-                        if (mac != null && !_userDisconnected.value && reconnectJob?.isActive != true) {
+                        if (mac != null && !_userDisconnected.value && reconnectJob?.isActive != true &&
+                            _reconnectStatus.value != ReconnectStatus.WAITING_FOR_BLUETOOTH
+                        ) {
                             Timber.tag(TAG).i("link down (%s), reconnecting in %d ms", c, AUTO_RECONNECT_DELAY_MS)
-                            reconnectJob = scope.launch {
-                                delay(AUTO_RECONNECT_DELAY_MS)
-                                reconnect(mac)
-                            }
+                            scheduleReconnect(mac, AUTO_RECONNECT_DELAY_MS)
                         }
+                    }
+                    // connect() refused (missing permission): no callback
+                    // will follow, so no retry either.
+                    is ConnectionState.Error -> if (_reconnectStatus.value == ReconnectStatus.RETRYING) {
+                        _reconnectStatus.value = ReconnectStatus.STOPPED
                     }
                     else -> Unit
                 }
@@ -244,6 +283,7 @@ class VendorConnection @Inject constructor(
         lastConnectedMac = null
         reconnectJob?.cancel()
         reconnectJob = null
+        _reconnectStatus.value = ReconnectStatus.IDLE
         stopHeartbeat()
         _phase.value = Phase.IDLE
         _live.value = LiveVendorData()
@@ -256,8 +296,40 @@ class VendorConnection @Inject constructor(
         val mac = lastConnectedMac ?: return false
         Timber.tag(TAG).i("reconnect requested by user")
         setUserDisconnected(false)
-        scope.launch { reconnect(mac) }
+        scheduleReconnect(mac, delayMs = 0L)
         return true
+    }
+
+    /** Retry [mac] after [delayMs], replacing any retry still waiting. */
+    private fun scheduleReconnect(mac: String, delayMs: Long) {
+        reconnectJob?.cancel()
+        _reconnectStatus.value = ReconnectStatus.RETRYING
+        reconnectJob = scope.launch {
+            delay(delayMs)
+            reconnect(mac)
+        }
+    }
+
+    private fun onBluetoothOff() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        if (lastConnectedMac != null && !_userDisconnected.value &&
+            _reconnectStatus.value != ReconnectStatus.WAITING_FOR_BLUETOOTH
+        ) {
+            Timber.tag(TAG).i("Bluetooth turning off; will reconnect when it is back on")
+            _reconnectStatus.value = ReconnectStatus.WAITING_FOR_BLUETOOTH
+        }
+        // The stack doesn't reliably report the drop when the adapter goes
+        // down. Close the client ourselves so the phase resets and the next
+        // connection runs the handshake again.
+        if (ble.state.value.connection != ConnectionState.Disconnected) ble.close()
+    }
+
+    private fun onBluetoothOn() {
+        val mac = lastConnectedMac ?: return
+        if (_userDisconnected.value) return
+        Timber.tag(TAG).i("Bluetooth on, reconnecting to %s in %d ms", mac, BLUETOOTH_ON_RECONNECT_DELAY_MS)
+        scheduleReconnect(mac, BLUETOOTH_ON_RECONNECT_DELAY_MS)
     }
 
     /** The user picked a watch: connect to it and resume auto-reconnecting. */
@@ -266,6 +338,13 @@ class VendorConnection @Inject constructor(
         // A retry still waiting to fire would tear this connection down.
         reconnectJob?.cancel()
         reconnectJob = null
+        _reconnectStatus.value = ReconnectStatus.IDLE
+        // Remember the chosen watch now, not only once it connects: if this
+        // first attempt fails, the retry must go to it and not to whichever
+        // watch was connected before (seen 10-27: a status-62 failure on the
+        // Vivid Call 2 was retried against the Colorfit Pro 2).
+        lastConnectedMac = device.address
+        persistLastMac(device.address)
         ble.connect(device)
     }
 
@@ -279,6 +358,7 @@ class VendorConnection @Inject constructor(
         setUserDisconnected(true)
         reconnectJob?.cancel()
         reconnectJob = null
+        _reconnectStatus.value = ReconnectStatus.IDLE
         if (ble.state.value.connection is ConnectionState.Connected) {
             ble.disconnect()
         } else {
@@ -300,11 +380,14 @@ class VendorConnection @Inject constructor(
             ?: run {
                 Timber.tag(TAG).w("reconnect: Bluetooth adapter unavailable")
                 _errors.update { it + "Bluetooth adapter unavailable for reconnect" }
+                _reconnectStatus.value = ReconnectStatus.STOPPED
                 return
             }
         if (!adapter.isEnabled) {
             Timber.tag(TAG).w("reconnect: Bluetooth is off (adapter state %d)", adapter.state)
             _errors.update { it + "Bluetooth is off — can't reconnect to $mac" }
+            // Not a dead end: the state receiver retries once it's back on.
+            _reconnectStatus.value = ReconnectStatus.WAITING_FOR_BLUETOOTH
             return
         }
         try {
@@ -316,9 +399,11 @@ class VendorConnection @Inject constructor(
         } catch (e: SecurityException) {
             Timber.tag(TAG).w(e, "reconnect: missing BLUETOOTH_CONNECT")
             _errors.update { it + "Missing BLUETOOTH_CONNECT permission for reconnect" }
+            _reconnectStatus.value = ReconnectStatus.STOPPED
         } catch (e: IllegalArgumentException) {
             Timber.tag(TAG).w(e, "reconnect: bad MAC %s", mac)
             _errors.update { it + "Bad MAC for reconnect: $mac" }
+            _reconnectStatus.value = ReconnectStatus.STOPPED
         }
     }
 
@@ -935,6 +1020,9 @@ class VendorConnection @Inject constructor(
          */
         private const val AUTO_RECONNECT_DELAY_MS = 10_000L
 
+        /** After Bluetooth turns on, let the stack settle before connecting. */
+        private const val BLUETOOTH_ON_RECONNECT_DELAY_MS = 2_000L
+
         /**
          * If we haven't seen an HR packet in this long, restart the HR
          * stream on the next heartbeat tick.
@@ -958,6 +1046,18 @@ enum class Phase {
     AUTH_FAILED,
     SYNCING,
     READY,
+}
+
+/** What auto-reconnect to the remembered watch is doing. */
+enum class ReconnectStatus {
+    /** Connected, or nothing to reconnect to (no watch yet, or the user disconnected). */
+    IDLE,
+    /** A retry is waiting to fire or a connect attempt is outstanding. */
+    RETRYING,
+    /** Bluetooth is off; a retry fires as soon as it comes back on. */
+    WAITING_FOR_BLUETOOTH,
+    /** A retry could not be started (no adapter, permission, bad MAC); only a manual retry helps. */
+    STOPPED,
 }
 
 data class LiveVendorData(

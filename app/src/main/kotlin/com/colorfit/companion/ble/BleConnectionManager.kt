@@ -447,6 +447,16 @@ class BleConnectionManager @Inject constructor(
             //    the 21-byte weather frame and BLE-5 payloads.
             enqueueOp("mtu") { issueMtu(PREFERRED_MTU) }
 
+            // 1b. The watch's own name (GAP Device Name), when Android has none:
+            //     an auto-reconnect via getRemoteDevice(mac) to this unbonded
+            //     watch carries no name, so the UI showed "Unknown" until the
+            //     user reconnected from a scan result.
+            if (g.device.name == null) {
+                services.firstOrNull { it.uuid == GattSpec.GENERIC_ACCESS }
+                    ?.getCharacteristic(GattSpec.DEVICE_NAME)
+                    ?.let { c -> enqueueOp("read device name") { issueRead(c) } }
+            }
+
             // 2. Device Information (small, static).
             services.firstOrNull { it.uuid == GattSpec.DEVICE_INFORMATION }?.let { devInfo ->
                 listOf(
@@ -582,6 +592,16 @@ class BleConnectionManager @Inject constructor(
             GattSpec.BATTERY_LEVEL ->
                 StandardParsers.parseBatteryLevel(v)?.let { pct ->
                     _state.update { it.copy(batteryPercent = pct) }
+                }
+            GattSpec.DEVICE_NAME ->
+                v.asDeviceInfoString()?.let { name ->
+                    _state.update {
+                        val conn = it.connection
+                        it.copy(
+                            deviceName = name,
+                            connection = if (conn is ConnectionState.Connected) conn.copy(deviceName = name) else conn,
+                        )
+                    }
                 }
             // NB: the manufacturer is its OWN field — writing it into
             // deviceName used to clobber the advertised watch name.

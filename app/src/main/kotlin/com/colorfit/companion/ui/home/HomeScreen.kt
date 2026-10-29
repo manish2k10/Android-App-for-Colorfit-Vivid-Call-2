@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothConnected
+import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DirectionsWalk
@@ -76,6 +77,7 @@ import com.google.accompanist.permissions.isGranted
 import com.colorfit.companion.domain.ConnectionState
 import com.colorfit.companion.domain.ServiceType
 import com.colorfit.companion.domain.WatchState
+import com.colorfit.companion.vendor.ReconnectStatus
 import com.colorfit.companion.vendor.VendorState
 
 @OptIn(com.google.accompanist.permissions.ExperimentalPermissionsApi::class)
@@ -103,6 +105,7 @@ fun HomeScreen(
     )
     val userInitiatedDisconnect by viewModel.userInitiatedDisconnect.collectAsStateWithLifecycle()
     val reconnecting by viewModel.reconnecting.collectAsStateWithLifecycle()
+    val reconnectStatus by viewModel.reconnectStatus.collectAsStateWithLifecycle()
     val weatherStatus by viewModel.weatherStatus.collectAsStateWithLifecycle()
     val capabilities by viewModel.capabilities.collectAsStateWithLifecycle()
 
@@ -147,7 +150,7 @@ fun HomeScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            item { ConnectionCard(state, status, viewModel::disconnect, reconnecting, viewModel::forgetWatch) }
+            item { ConnectionCard(state, status, viewModel::disconnect, reconnectStatus, viewModel::forgetWatch) }
 
             // Nudge the user to exempt the app from battery optimization —
             // without it, aggressive OEMs (Motorola, Xiaomi, …) kill the
@@ -164,7 +167,7 @@ fun HomeScreen(
             val showConnectedView = state.isConnected || (!userInitiatedDisconnect && reconnecting)
             if (showConnectedView) {
                 if (reconnecting && !state.isConnected) {
-                    item { ReconnectingCard(viewModel::reconnectNow) }
+                    item { ReconnectingCard(reconnectStatus, viewModel::reconnectNow) }
                 }
                 item { LiveMetricsCard(state, vendorState, isHrStreaming = viewModel.heartRateStreaming()) }
                 item { SleepCard(vendorState.historical) }
@@ -254,8 +257,9 @@ private fun BackgroundPermissionCard() {
 }
 
 @Composable
-private fun ConnectionCard(state: WatchState, status: UiStatus, onDisconnect: () -> Unit, reconnecting: Boolean, onForget: () -> Unit) {
+private fun ConnectionCard(state: WatchState, status: UiStatus, onDisconnect: () -> Unit, reconnectStatus: ReconnectStatus, onForget: () -> Unit) {
     val connected = state.connection is ConnectionState.Connected
+    val reconnecting = reconnectStatus != ReconnectStatus.IDLE
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -284,7 +288,11 @@ private fun ConnectionCard(state: WatchState, status: UiStatus, onDisconnect: ()
                     }
                     if (reconnecting && !connected) {
                         Text(
-                            "Reconnecting to last paired watch…",
+                            when (reconnectStatus) {
+                                ReconnectStatus.WAITING_FOR_BLUETOOTH -> "Waiting for Bluetooth to turn on"
+                                ReconnectStatus.STOPPED -> "Not reconnecting"
+                                else -> "Reconnecting to last paired watch…"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.tertiary,
                         )
@@ -637,7 +645,16 @@ private fun ScanCard(
 }
 
 @Composable
-private fun ReconnectingCard(onRetryNow: () -> Unit) {
+private fun ReconnectingCard(reconnectStatus: ReconnectStatus, onRetryNow: () -> Unit) {
+    // Only claim to be retrying while a retry is actually pending.
+    val (title, detail) = when (reconnectStatus) {
+        ReconnectStatus.WAITING_FOR_BLUETOOTH ->
+            "Bluetooth is off" to "Turn Bluetooth on and the app reconnects to your watch by itself."
+        ReconnectStatus.STOPPED ->
+            "Not reconnecting" to "A reconnect couldn't be started (check the Bluetooth permission). Tap Retry to try again."
+        else ->
+            "Reconnecting…" to "Watch link dropped. Retrying in the background until the watch is back in range."
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -646,25 +663,42 @@ private fun ReconnectingCard(onRetryNow: () -> Unit) {
             modifier = Modifier.padding(20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            androidx.compose.material3.CircularProgressIndicator(
-                modifier = Modifier.size(28.dp),
-                strokeWidth = 3.dp,
-                color = MaterialTheme.colorScheme.tertiary,
-            )
+            when (reconnectStatus) {
+                ReconnectStatus.RETRYING -> androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    strokeWidth = 3.dp,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+                ReconnectStatus.WAITING_FOR_BLUETOOTH -> Icon(
+                    Icons.Default.BluetoothDisabled,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(28.dp),
+                )
+                else -> Icon(
+                    Icons.Default.Bluetooth,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
             Spacer(Modifier.size(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    "Reconnecting…",
+                    title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "Watch link dropped. Auto-retrying in the background — your data stays loaded.",
+                    detail,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onTertiaryContainer,
                 )
             }
-            OutlinedButton(onClick = onRetryNow) { Text("Retry now") }
+            // A retry while Bluetooth is off would only land back here.
+            if (reconnectStatus != ReconnectStatus.WAITING_FOR_BLUETOOTH) {
+                OutlinedButton(onClick = onRetryNow) { Text("Retry now") }
+            }
         }
     }
 }

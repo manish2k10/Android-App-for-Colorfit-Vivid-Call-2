@@ -11,10 +11,10 @@ import com.colorfit.companion.ble.BleForegroundService
 import com.colorfit.companion.ble.BlePermissions
 import com.colorfit.companion.ble.BleScanner
 import com.colorfit.companion.data.GattDumper
-import com.colorfit.companion.domain.ConnectionState
 import com.colorfit.companion.domain.WatchState
 import com.colorfit.companion.vendor.DailyWeather
 import com.colorfit.companion.vendor.NotificationAppId
+import com.colorfit.companion.vendor.ReconnectStatus
 import com.colorfit.companion.vendor.VendorConnection
 import com.colorfit.companion.vendor.VendorState
 import com.colorfit.companion.vendor.WeatherService
@@ -70,13 +70,20 @@ class HomeViewModel @Inject constructor(
     val userInitiatedDisconnect: StateFlow<Boolean> = vendor.userDisconnected
 
     /**
-     * True while we're trying to reconnect to a previously-paired
-     * watch after a transient drop. Drives the in-app "reconnecting…"
-     * banner so the UI doesn't bounce back to the scan card on every
-     * 2-second retry cycle.
+     * What auto-reconnect is doing: retrying, waiting for Bluetooth, or
+     * stopped. Drives the reconnect banner so it only says "Reconnecting…"
+     * while a retry is really pending.
      */
-    private val _reconnecting = MutableStateFlow(false)
-    val reconnecting: StateFlow<Boolean> = _reconnecting.asStateFlow()
+    val reconnectStatus: StateFlow<ReconnectStatus> = vendor.reconnectStatus
+
+    /**
+     * True while a previously-paired watch is dropped and not deliberately
+     * disconnected, so the UI stays on the connected view with a banner
+     * instead of bouncing back to the scan card.
+     */
+    val reconnecting: StateFlow<Boolean> = vendor.reconnectStatus
+        .map { it != ReconnectStatus.IDLE }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, vendor.reconnectStatus.value != ReconnectStatus.IDLE)
 
     private val permissions = MutableStateFlow(BlePermissions.snapshot(application))
     val allRequiredPermissionsGranted: StateFlow<Boolean> =
@@ -133,18 +140,13 @@ class HomeViewModel @Inject constructor(
 
     fun connect(device: BluetoothDevice) {
         stopScan()
-        _reconnecting.value = false
         vendor.connect(device)
-        BleForegroundService.startConnected(
-            getApplication(),
-            device.name ?: device.address,
-        )
+        BleForegroundService.start(getApplication())
     }
 
     fun disconnect() {
-        _reconnecting.value = false
         vendor.disconnect()
-        BleForegroundService.startDisconnected(getApplication())
+        BleForegroundService.start(getApplication())
     }
 
     fun dumpGattTable() {
@@ -210,7 +212,6 @@ class HomeViewModel @Inject constructor(
     fun forgetWatch() {
         vendor.clearLastMac()
         connection.disconnect()
-        _reconnecting.value = false
         // Nothing left to keep alive for — tear the service down so the
         // persistent notification goes away.
         BleForegroundService.stop(getApplication())
@@ -224,15 +225,6 @@ class HomeViewModel @Inject constructor(
     fun heartRateStreaming(): Boolean = vendor.heartRateStreaming
 
     init {
-        // If we already have a bonded MAC (persisted from a previous
-        // session), flip the UI into "reconnecting" immediately so the
-        // scan card never flashes for half a second on relaunch. The
-        // VendorConnection singleton schedules the actual BLE
-        // reconnect attempt in its own init block (unless the user left it
-        // disconnected).
-        if (vendor.lastConnectedMac != null && !vendor.userDisconnected.value) {
-            _reconnecting.value = true
-        }
         // Whenever the vendor handshake completes, auto-push weather if
         // we already have a location set. Saves the user a tap every
         // time they put the watch on.
@@ -241,23 +233,6 @@ class HomeViewModel @Inject constructor(
                 if (weather.location.value != null) {
                     val ok = weather.refreshAndPush()
                     Timber.tag("Home").i("Auto weather push on connect: ok=$ok")
-                }
-            }
-        }
-        // Track reconnecting state for the UI. When the BLE link drops
-        // and we have a remembered MAC, mark the UI as "reconnecting"
-        // so we don't bounce back to the scan card.
-        viewModelScope.launch {
-            connection.state.collect { s ->
-                val connected = s.connection is ConnectionState.Connected
-                val idle = s.connection is ConnectionState.Idle ||
-                    s.connection is ConnectionState.Disconnected
-                if (idle && !vendor.userDisconnected.value && vendor.lastConnectedMac != null) {
-                    _reconnecting.value = true
-                } else if (connected) {
-                    _reconnecting.value = false
-                } else {
-                    _reconnecting.value = false
                 }
             }
         }
