@@ -158,6 +158,18 @@ writes get painful.
 - **Second watch — ColorFit band:** ✅ added as the separate `:band` app
   (MOYOUNG protocol, `docs/band-protocol.md`).
 
+## TODO
+
+- **"Cancel" on the reconnecting card turns auto-reconnect off.** While the
+  companion is reconnecting, the connection card's **Cancel** button calls
+  `VendorConnection.disconnect()`, which sets the persisted `user_disconnected`
+  flag. That flag blocks every auto-reconnect, including after a reboot, until
+  the user connects again by hand. It was the first cause of the "stops
+  syncing after a few days" bug found on 10-27: one accidental tap leaves the
+  app disconnected for good. Decide what Cancel should mean (stop this attempt
+  only, or a real "stay disconnected" with a clear label) and stop it setting
+  the sticky flag by accident.
+
 ## Legal
 
 This project doesn't ship any Noise or MOYOUNG proprietary code. Protocol
